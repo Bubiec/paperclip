@@ -12,6 +12,7 @@ import {
   boolean,
   unique,
   uniqueIndex,
+  check,
 } from "drizzle-orm/pg-core";
 import { companies } from "./companies.js";
 import { agents } from "./agents.js";
@@ -161,6 +162,10 @@ export const heartbeatRuns = pgTable(
       table.companyId,
       sql`(${table.contextSnapshot} ->> 'taskKey')`,
       table.createdAt.desc(),
+    ),
+    retryOfRunNotSelfCheck: check(
+      "heartbeat_runs_retry_of_run_id_not_self_check",
+      sql`${table.retryOfRunId} is null or ${table.retryOfRunId} <> ${table.id}`,
     ),
   }),
 );

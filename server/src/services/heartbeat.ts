@@ -11126,6 +11126,14 @@ export function heartbeatService(
     return Number.isNaN(date.getTime()) ? null : date;
   }
 
+  const DEFAULT_MAX_ISSUE_MONITOR_ATTEMPTS = 3;
+
+  function effectiveIssueMonitorMaxAttempts(
+    monitor: IssueExecutionMonitorPolicy | null,
+  ) {
+    return monitor?.maxAttempts ?? DEFAULT_MAX_ISSUE_MONITOR_ATTEMPTS;
+  }
+
   function issueMonitorLimitClearReason(input: {
     monitor: IssueExecutionMonitorPolicy | null;
     nextAttemptCount: number;
@@ -11135,8 +11143,8 @@ export function heartbeatService(
     if (timeoutAt && input.now.getTime() >= timeoutAt.getTime()) {
       return "timeout_exceeded";
     }
-    const maxAttempts = input.monitor?.maxAttempts ?? null;
-    if (maxAttempts !== null && input.nextAttemptCount > maxAttempts) {
+    const maxAttempts = effectiveIssueMonitorMaxAttempts(input.monitor);
+    if (input.nextAttemptCount > maxAttempts) {
       return "max_attempts_exhausted";
     }
     return null;
@@ -11164,7 +11172,7 @@ export function heartbeatService(
       notes: input.claimed.monitorNotes ?? null,
       serviceName: input.monitor?.serviceName ?? null,
       timeoutAt: input.monitor?.timeoutAt ?? null,
-      maxAttempts: input.monitor?.maxAttempts ?? null,
+      maxAttempts: effectiveIssueMonitorMaxAttempts(input.monitor),
       clearReason: input.clearReason,
       recoveryPolicy: input.recoveryPolicy,
       source: input.source,
@@ -11369,7 +11377,7 @@ export function heartbeatService(
           clearReason: input.clearReason,
           serviceName: input.monitor?.serviceName ?? null,
           timeoutAt: input.monitor?.timeoutAt ?? null,
-          maxAttempts: input.monitor?.maxAttempts ?? null,
+          maxAttempts: effectiveIssueMonitorMaxAttempts(input.monitor),
           ...(reviewPathContext ?? {}),
         },
         "status_only",
@@ -11386,7 +11394,7 @@ export function heartbeatService(
           clearReason: input.clearReason,
           serviceName: input.monitor?.serviceName ?? null,
           timeoutAt: input.monitor?.timeoutAt ?? null,
-          maxAttempts: input.monitor?.maxAttempts ?? null,
+          maxAttempts: effectiveIssueMonitorMaxAttempts(input.monitor),
           ...(reviewPathContext ?? {}),
         },
         "status_only",
@@ -11421,7 +11429,7 @@ export function heartbeatService(
     runId: string | null;
     activitySource: "manual" | "scheduled";
   }) {
-    await db
+    const transitioned = await db
       .update(issues)
       .set({
         ...buildIssueMonitorClearedPatch({
@@ -11430,9 +11438,44 @@ export function heartbeatService(
           clearReason: input.clearReason,
           clearedAt: input.now,
         }),
+        status: "blocked",
+        checkoutRunId: null,
+        executionRunId: null,
+        executionAgentNameKey: null,
+        executionLockedAt: null,
+        unblockDescriptor: {
+          owner: "board",
+          action: "Inspect the exhausted issue monitor and restore an explicit execution or waiting path.",
+        },
+        blockedTransitionAt: input.now,
+        blockedOwnerNotifiedAt: null,
         updatedAt: input.now,
       })
-      .where(eq(issues.id, input.claimed.id));
+      .where(
+        and(
+          eq(issues.id, input.claimed.id),
+          eq(issues.companyId, input.claimed.companyId),
+          or(
+            inArray(issues.status, ["todo", "in_progress", "in_review"]),
+            and(eq(issues.status, "blocked"), isNull(issues.unblockDescriptor)),
+          ),
+          input.claimed.monitorNextCheckAt
+            ? eq(issues.monitorNextCheckAt, input.claimed.monitorNextCheckAt)
+            : isNull(issues.monitorNextCheckAt),
+          eq(
+            issues.monitorAttemptCount,
+            input.claimed.monitorAttemptCount ?? 0,
+          ),
+        ),
+      )
+      .returning({ id: issues.id });
+
+    if (transitioned.length === 0) {
+      return {
+        outcome: "skipped" as const,
+        reason: "monitor_state_changed" as const,
+      };
+    }
 
     await logActivity(db, {
       companyId: input.claimed.companyId,
@@ -11505,7 +11548,7 @@ export function heartbeatService(
     const monitorMetadata = {
       serviceName: monitor?.serviceName ?? null,
       timeoutAt: monitor?.timeoutAt ?? null,
-      maxAttempts: monitor?.maxAttempts ?? null,
+      maxAttempts: effectiveIssueMonitorMaxAttempts(monitor),
       recoveryPolicy: monitor?.recoveryPolicy ?? null,
     };
     const executionState =
@@ -13046,6 +13089,52 @@ export function heartbeatService(
     });
   }
 
+  async function findDurableRunLivenessContinuationBudget(input: {
+    run: typeof heartbeatRuns.$inferSelect;
+    issueId: string;
+    livenessState: RunLivenessState;
+  }) {
+    const issueContext = or(
+      sql`${heartbeatRuns.contextSnapshot} ->> 'issueId' = ${input.issueId}`,
+      sql`${heartbeatRuns.contextSnapshot} ->> 'taskId' = ${input.issueId}`,
+    );
+    const latestUsefulAction = await db
+      .select({ at: heartbeatRuns.lastUsefulActionAt })
+      .from(heartbeatRuns)
+      .where(
+        and(
+          eq(heartbeatRuns.companyId, input.run.companyId),
+          issueContext,
+          sql`${heartbeatRuns.lastUsefulActionAt} is not null`,
+        ),
+      )
+      .orderBy(desc(heartbeatRuns.lastUsefulActionAt))
+      .limit(1)
+      .then((rows) => rows[0]?.at ?? null);
+
+    const conditions = [
+      eq(heartbeatRuns.companyId, input.run.companyId),
+      eq(heartbeatRuns.livenessState, input.livenessState),
+      issueContext,
+    ];
+    if (latestUsefulAction) {
+      conditions.push(gte(heartbeatRuns.createdAt, latestUsefulAction));
+    }
+
+    const durableAttempt = await db
+      .select({ attempt: heartbeatRuns.continuationAttempt })
+      .from(heartbeatRuns)
+      .where(and(...conditions))
+      .orderBy(desc(heartbeatRuns.continuationAttempt))
+      .limit(1)
+      .then((rows) => readContinuationAttempt(rows[0]?.attempt));
+
+    return {
+      attempt: durableAttempt,
+      budgetEpoch: latestUsefulAction?.toISOString() ?? null,
+    };
+  }
+
   async function handleRunLivenessContinuation(
     run: typeof heartbeatRuns.$inferSelect,
   ) {
@@ -13075,6 +13164,7 @@ export function heartbeatService(
           assigneeAgentId: issues.assigneeAgentId,
           executionState: issues.executionState,
           projectId: issues.projectId,
+          unblockDescriptor: issues.unblockDescriptor,
         })
         .from(issues)
         .where(and(eq(issues.id, issueId), eq(issues.companyId, run.companyId)))
@@ -13098,13 +13188,27 @@ export function heartbeatService(
           })
         : null;
 
-    const nextAttempt = readContinuationAttempt(run.continuationAttempt) + 1;
+    const durableBudget = issue
+      ? await findDurableRunLivenessContinuationBudget({
+          run,
+          issueId: issue.id,
+          livenessState,
+        })
+      : {
+          attempt: readContinuationAttempt(run.continuationAttempt),
+          budgetEpoch: null,
+        };
+    const nextAttempt = Math.max(
+      readContinuationAttempt(run.continuationAttempt),
+      durableBudget.attempt,
+    ) + 1;
     const idempotencyKey = issue
       ? buildRunLivenessContinuationIdempotencyKey({
           issueId: issue.id,
           sourceRunId: run.id,
           livenessState,
           nextAttempt,
+          budgetEpoch: durableBudget.budgetEpoch,
         })
       : null;
     const existingWake = idempotencyKey
@@ -13123,16 +13227,61 @@ export function heartbeatService(
       nextAction: run.nextAction,
       budgetBlocked: Boolean(budgetBlock),
       idempotentWakeExists: Boolean(existingWake),
+      durableAttempt: durableBudget.attempt,
+      budgetEpoch: durableBudget.budgetEpoch,
     });
 
     if (decision.kind === "exhausted") {
+      const now = new Date();
       await setRunStatus(run.id, run.status, {
+        continuationAttempt: decision.attempt,
         livenessReason: `${run.livenessReason ?? "Run ended without concrete progress"}; continuation attempts exhausted`,
       });
+      await db
+        .update(issues)
+        .set({
+          status: "blocked",
+          checkoutRunId: null,
+          executionRunId: null,
+          executionAgentNameKey: null,
+          executionLockedAt: null,
+          unblockDescriptor: {
+            owner: "board",
+            action: "Inspect the exhausted bounded liveness continuation and provide a concrete execution or waiting path.",
+          },
+          blockedTransitionAt: now,
+          blockedOwnerNotifiedAt: null,
+          updatedAt: now,
+        })
+        .where(
+          and(
+            eq(issues.id, issueId),
+            eq(issues.companyId, run.companyId),
+            or(
+              inArray(issues.status, ["todo", "in_progress"]),
+              and(eq(issues.status, "blocked"), isNull(issues.unblockDescriptor)),
+            ),
+          ),
+        );
       await addContinuationExhaustedCommentOnce({
         run,
         issueId,
         comment: decision.comment,
+      });
+      await logActivity(db, {
+        companyId: run.companyId,
+        actorType: "system",
+        actorId: "heartbeat",
+        agentId: run.agentId,
+        runId: run.id,
+        action: "issue.liveness_continuation_exhausted",
+        entityType: "issue",
+        entityId: issueId,
+        details: {
+          livenessState,
+          attempt: decision.attempt,
+          maxAttempts: decision.maxAttempts,
+        },
       });
       return;
     }

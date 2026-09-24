@@ -460,6 +460,11 @@ describeEmbeddedPostgres("issue monitor scheduler", () => {
       status: "cleared",
       clearReason: "max_attempts_exhausted",
     });
+    expect(issue.status).toBe("blocked");
+    expect(issue.unblockDescriptor).toEqual({
+      owner: "board",
+      action: expect.stringContaining("monitor"),
+    });
 
     const wakeup = await db
       .select()
@@ -481,6 +486,40 @@ describeEmbeddedPostgres("issue monitor scheduler", () => {
     expect(activity).toContain("issue.monitor_exhausted");
     expect(activity).toContain("issue.monitor_recovery_wake_queued");
     expect(activity).not.toContain("issue.monitor_triggered");
+  });
+
+  it("bounds a high-run monitor storm even when maxAttempts is omitted", async () => {
+    const { issueId, agentId } = await seedFixture({
+      monitorAttemptCount: 100,
+      monitor: {
+        recoveryPolicy: "wake_owner",
+      },
+    });
+    const heartbeat = heartbeatService(db);
+
+    const result = await heartbeat.tickTimers(new Date("2026-04-11T12:31:00.000Z"));
+
+    expect(result).toMatchObject({ enqueued: 0, skipped: 1 });
+    const issue = await db.select().from(issues).where(eq(issues.id, issueId)).then((rows) => rows[0]!);
+    expect(issue).toMatchObject({
+      status: "blocked",
+      monitorNextCheckAt: null,
+      unblockDescriptor: {
+        owner: "board",
+      },
+    });
+    expect(parseIssueExecutionState(issue.executionState)?.monitor).toMatchObject({
+      status: "cleared",
+      clearReason: "max_attempts_exhausted",
+    });
+
+    const wakeups = await db
+      .select()
+      .from(agentWakeupRequests)
+      .where(eq(agentWakeupRequests.agentId, agentId));
+    expect(wakeups.filter((wakeup) => wakeup.reason === "issue_monitor_recovery")).toHaveLength(1);
+    expect(wakeups.filter((wakeup) => wakeup.reason === "issue_monitor_due")).toHaveLength(0);
+    expect(wakeups[0]?.payload).toMatchObject({ maxAttempts: 3 });
   });
 
   it("clears timed-out monitors and creates a visible recovery issue when requested", async () => {
