@@ -969,6 +969,11 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
   ) {
     if (issue.status !== "todo" || latestRun?.status !== "succeeded") return false;
     const runBeganAt = latestRun.startedAt ?? latestRun.createdAt;
+    const context = parseObject(latestRun.contextSnapshot);
+    const restoredActionId = context.wakeReason === "issue_recovery_action_restored"
+      && latestRun.agentId === issue.assigneeAgentId
+      ? readNonEmptyString(context.recoveryActionId)
+      : null;
 
     return db
       .select({ id: issueRecoveryActions.id })
@@ -979,7 +984,15 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
           eq(issueRecoveryActions.sourceIssueId, issue.id),
           eq(issueRecoveryActions.status, "resolved"),
           eq(issueRecoveryActions.outcome, "handed_back"),
-          gte(issueRecoveryActions.resolvedAt, runBeganAt),
+          or(
+            gte(issueRecoveryActions.resolvedAt, runBeganAt),
+            restoredActionId && issue.assigneeAgentId
+              ? and(
+                eq(issueRecoveryActions.id, restoredActionId),
+                eq(issueRecoveryActions.returnOwnerAgentId, issue.assigneeAgentId),
+              )
+              : undefined,
+          ),
         ),
       )
       .limit(1)
@@ -4058,15 +4071,20 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
           continue;
         }
 
+        // Success means the adapter exited cleanly, not that dispatch advanced
+        // the issue. Spend the same one-retry budget for an unchanged todo.
+        const successfulAssignmentRecovery = latestRun.status === "succeeded"
+          && readNonEmptyString(parseObject(latestRun.contextSnapshot).retryReason) === "assignment_recovery";
         if (
           latestRun.status === "succeeded" &&
+          !successfulAssignmentRecovery &&
           !(await wasTodoHandedBackDuringOrAfterLatestRun(issue, latestRun))
         ) {
           result.skipped += 1;
           continue;
         }
 
-        if (didAutomaticRecoveryFail(latestRun, "assignment_recovery")) {
+        if (successfulAssignmentRecovery || didAutomaticRecoveryFail(latestRun, "assignment_recovery")) {
           const updated = await escalateStrandedAssignedIssue({
             issue,
             previousStatus: "todo",

@@ -12752,12 +12752,34 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         ? null
         : await getIssueContinuationSummaryDocument(db, issueId);
       const continuationSummaryBody = queuedContinuationSummary ?? currentContinuationSummary?.body ?? null;
-      if (continuationSummaryParksExecutor(continuationSummaryBody)) {
+      // A generated review instruction can outlive the review status. Consult
+      // durable gates before allowing current executable work to supersede it.
+      const [pendingInteraction, pendingApproval] = await Promise.all([
+        db.select({ id: issueThreadInteractions.id }).from(issueThreadInteractions)
+          .where(and(
+            eq(issueThreadInteractions.companyId, run.companyId),
+            eq(issueThreadInteractions.issueId, issueId),
+            eq(issueThreadInteractions.status, "pending"),
+          )).limit(1).then((rows) => rows[0]),
+        db.select({ id: issueApprovals.approvalId }).from(issueApprovals)
+          .innerJoin(approvals, eq(issueApprovals.approvalId, approvals.id))
+          .where(and(
+            eq(issueApprovals.companyId, run.companyId),
+            eq(approvals.companyId, run.companyId),
+            eq(issueApprovals.issueId, issueId),
+            inArray(approvals.status, ["pending", "revision_requested"]),
+          )).limit(1).then((rows) => rows[0]),
+      ]);
+      if (continuationSummaryParksExecutor(continuationSummaryBody, {
+        status: issue.status,
+        hasPendingReviewOrApproval: Boolean(pendingInteraction || pendingApproval)
+          || parseIssueExecutionState(issue.executionState)?.status === "pending",
+      })) {
         return {
           stale: true,
           errorCode: "issue_continuation_waiting_on_review",
           reason:
-            "Cancelled because the continuation summary says the executor should wait for reviewer feedback or approval before more work starts",
+            "Cancelled because a pending review/approval gate or an explicit continuation instruction requires the executor to wait",
           details: {
             issueId,
             wakeReason,

@@ -9,6 +9,7 @@ export const ISSUE_CONTINUATION_SUMMARY_TITLE = "Continuation Summary";
 export const ISSUE_CONTINUATION_SUMMARY_MAX_BODY_CHARS = 8_000;
 const SUMMARY_SECTION_MAX_CHARS = 1_200;
 const PATH_CANDIDATE_RE = /(?:^|[\s`"'(])((?:server|ui|packages|doc|scripts|\.github)\/[A-Za-z0-9._/-]+)/g;
+const GENERATED_REVIEW_NEXT_ACTION = "Wait for reviewer feedback or approval before continuing executor work.";
 const WAITING_FOR_REVIEW_OR_APPROVAL_RE =
   /\bwait(?:ing)? for\b.{0,160}\b(?:review(?:er)?(?: feedback)?|approval|board|human|user|operator)\b/i;
 
@@ -101,7 +102,11 @@ function inferMode(issue: IssueSummaryInput, run: RunSummaryInput) {
 
 function inferNextAction(issue: IssueSummaryInput, run: RunSummaryInput, previousNextAction: string | null) {
   if (issue.status === "done") return "Review the completed issue output and close any remaining follow-up comments.";
-  if (issue.status === "in_review") return "Wait for reviewer feedback or approval before continuing executor work.";
+  if (issue.status === "in_review") return GENERATED_REVIEW_NEXT_ACTION;
+  // This default describes a status, not a durable approval. Do not carry it
+  // across a return to executable work; retain specific operator instructions.
+  if ((issue.status === "todo" || issue.status === "in_progress")
+    && previousNextAction === GENERATED_REVIEW_NEXT_ACTION) previousNextAction = null;
   if (run.status === "failed" || run.status === "timed_out") {
     return "Inspect the failed run, fix the cause, and resume from the most recent concrete action above.";
   }
@@ -127,9 +132,16 @@ export function extractContinuationSummaryNextAction(body: string | null | undef
   return extractPreviousNextAction(body);
 }
 
-export function continuationSummaryParksExecutor(body: string | null | undefined) {
+export function continuationSummaryParksExecutor(
+  body: string | null | undefined,
+  currentState?: { status: string; hasPendingReviewOrApproval: boolean },
+) {
+  if (currentState?.hasPendingReviewOrApproval) return true;
   const nextAction = extractContinuationSummaryNextAction(body);
   if (!nextAction) return false;
+  if (currentState?.status === "in_progress"
+    && !currentState.hasPendingReviewOrApproval
+    && nextAction === GENERATED_REVIEW_NEXT_ACTION) return false;
   return WAITING_FOR_REVIEW_OR_APPROVAL_RE.test(nextAction);
 }
 
