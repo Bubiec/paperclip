@@ -1,0 +1,92 @@
+name: Recovery backport isolated build
+on:
+  push:
+    branches: [ci/recovery-npm-2026.824.1]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: recovery-backport-isolated
+  cancel-in-progress: false
+env:
+  SOURCE_SHA: 3ebb746d6da50e384a9f9ab0ce7fca6c15e7aa7c
+  PAPERCLIP_HOME: ${{ runner.temp }}/paperclip-validation
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        command: ['pnpm -r typecheck', 'pnpm test:run', 'pnpm build']
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: 3ebb746d6da50e384a9f9ab0ce7fca6c15e7aa7c
+          persist-credentials: false
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 9.15.4
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - name: Verify immutable source and release package manifest
+        run: |
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          node scripts/release-package-map.mjs check
+      - run: pnpm install --frozen-lockfile
+      - run: ${{ matrix.command }}
+  payload:
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: 3ebb746d6da50e384a9f9ab0ce7fca6c15e7aa7c
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - name: Bootstrap retained release installer in disposable store
+        run: |
+          npm install --global corepack
+          npm install --prefix "$RUNNER_TEMP/bootstrap" paperclipai@2026.824.1 --no-audit --no-fund
+      - name: Supported exact-source install and built-in CLI smoke
+        run: |
+          mkdir -p "$RUNNER_TEMP/build-home"
+          HOME="$RUNNER_TEMP/build-home" PAPERCLIP_HOME="$RUNNER_TEMP/build-home/.paperclip" \
+            node "$RUNNER_TEMP/bootstrap/node_modules/paperclipai/dist/index.js" install \
+            --repo Bubiec/paperclip --ref "$SOURCE_SHA" --yes
+      - name: Verify packaged migrations and schema against release; archive only payload
+        run: |
+          python3 - <<'PY'
+          import os, pathlib, hashlib, json, subprocess
+          root = pathlib.Path(os.environ['RUNNER_TEMP'])
+          sha = os.environ['SOURCE_SHA']
+          payload = root/'build-home/.paperclip/cli/installs/git'/sha[:12]
+          installed = root/'bootstrap/node_modules/@paperclipai/db'
+          built = payload/'node_modules/@paperclipai/db'
+          source = pathlib.Path('packages/db')
+          def hashes(path):
+              assert path.is_dir(), str(path)
+              return {str(p.relative_to(path)): hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(path.rglob('*')) if p.is_file()}
+          migrations = hashes(installed/'dist/migrations')
+          assert migrations == hashes(built/'dist/migrations'), 'packaged migration mismatch'
+          assert migrations == hashes(source/'src/migrations'), 'source migration mismatch'
+          schema = {k:v for k,v in hashes(installed/'dist/schema').items() if k.endswith('.js')}
+          assert schema == {k:v for k,v in hashes(built/'dist/schema').items() if k.endswith('.js')}, 'schema mismatch'
+          manifest = json.loads((root/'build-home/.paperclip/cli/install.json').read_text())
+          out = pathlib.Path('artifact'); out.mkdir()
+          evidence = {'sourceSha':sha, 'releaseBase':'8e6edcdfa911151adba26be49a41cf5017b3aade', 'baseline':'paperclipai@2026.824.1', 'migrationHashes':migrations, 'schemaHashes':schema, 'installerManifest':manifest, 'platform':subprocess.check_output(['uname','-sm'],text=True).strip(), 'node':subprocess.check_output(['node','--version'],text=True).strip()}
+          (out/'provenance.json').write_text(json.dumps(evidence,indent=2)+'\n')
+          subprocess.run(['tar','-czf',str(out/'payload.tar.gz'),'-C',str(payload.parent),payload.name],check=True)
+          (out/'SHA256SUMS').write_text(''.join(hashlib.sha256(p.read_bytes()).hexdigest()+'  '+p.name+'\n' for p in [out/'payload.tar.gz',out/'provenance.json']))
+          print((out/'SHA256SUMS').read_text())
+          PY
+      - uses: actions/upload-artifact@v7
+        with:
+          name: recovery-payload-3ebb746d6da5
+          path: artifact/
+          retention-days: 14
+          if-no-files-found: error
