@@ -17,7 +17,20 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        command: ['pnpm -r typecheck', 'pnpm test:run', 'pnpm build']
+        command:
+          - pnpm -r typecheck
+          - pnpm build
+          - pnpm test:run:general -- --group general-server --shard-index 0 --shard-count 3
+          - pnpm test:run:general -- --group general-server --shard-index 1 --shard-count 3
+          - pnpm test:run:general -- --group general-server --shard-index 2 --shard-count 3
+          - pnpm test:run:general -- --group general-workspaces-a --shard-index 0 --shard-count 2
+          - pnpm test:run:general -- --group general-workspaces-a --shard-index 1 --shard-count 2
+          - pnpm test:run:general -- --group general-workspaces-b
+          - pnpm test:run:serialized -- --shard-index 0 --shard-count 5
+          - pnpm test:run:serialized -- --shard-index 1 --shard-count 5
+          - pnpm test:run:serialized -- --shard-index 2 --shard-count 5
+          - pnpm test:run:serialized -- --shard-index 3 --shard-count 5
+          - pnpm test:run:serialized -- --shard-index 4 --shard-count 5
     steps:
       - uses: actions/checkout@v7
         with:
