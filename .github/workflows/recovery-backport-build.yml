@@ -10,10 +10,11 @@ concurrency:
   cancel-in-progress: false
 env:
   SOURCE_SHA: 3ebb746d6da50e384a9f9ab0ce7fca6c15e7aa7c
-  PAPERCLIP_HOME: ${{ runner.temp }}/paperclip-validation
 jobs:
   validate:
     runs-on: ubuntu-latest
+    env:
+      PAPERCLIP_HOME: ${{ runner.temp }}/paperclip-validation
     timeout-minutes: 60
     strategy:
       fail-fast: false
