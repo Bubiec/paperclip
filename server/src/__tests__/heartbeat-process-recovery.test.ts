@@ -11,6 +11,8 @@ import {
   agentRuntimeState,
   agentWakeupRequests,
   authUsers,
+  approvals,
+  issueApprovals,
   budgetPolicies,
   companySecretBindings,
   companySecrets,
@@ -398,6 +400,8 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     await db.delete(documentRevisions);
     await db.delete(documents);
     await db.delete(issueRelations);
+    await db.delete(issueApprovals);
+    await db.delete(approvals);
     await db.delete(issueRecoveryActions);
     await db.delete(issueTreeHoldMembers);
     await db.delete(issueTreeHolds);
@@ -5246,13 +5250,21 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     }
   });
 
-  it("re-enqueues handed-back todo work when its resolving run succeeded but the wake was lost", async () => {
+  it.each(["during_run", "before_followup", "old_unlinked"])("re-enqueues handed-back todo work with handback %s", async (timing) => {
     const { companyId, agentId, issueId, runId } = await seedStrandedIssueFixture({
       status: "todo",
       runStatus: "succeeded",
     });
-    const resolvedAt = new Date("2026-03-19T00:04:00.000Z");
+    const actionId = randomUUID();
+    const resolvedAt = new Date(timing === "during_run" ? "2026-03-19T00:04:00.000Z" : "2026-03-18T23:59:00.000Z");
+    if (timing === "before_followup") {
+      await db.update(heartbeatRuns).set({ contextSnapshot: {
+        issueId, taskId: issueId, wakeReason: "issue_recovery_action_restored",
+        source: "issue.recovery_action_resolution", recoveryActionId: actionId,
+      } }).where(eq(heartbeatRuns.id, runId));
+    }
     await db.insert(issueRecoveryActions).values({
+      id: actionId,
       companyId,
       sourceIssueId: issueId,
       kind: "stranded_assigned_issue",
@@ -5273,11 +5285,17 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     const heartbeat = heartbeatService(db);
 
     const result = await heartbeat.reconcileStrandedAssignedIssues();
+    if (timing === "old_unlinked") {
+      expect(result.dispatchRequeued).toBe(0);
+      expect(result.escalated).toBe(0);
+      return;
+    }
     expect(result.assignmentDispatched).toBe(0);
     expect(result.dispatchRequeued).toBe(1);
     expect(result.continuationRequeued).toBe(0);
     expect(result.escalated).toBe(0);
     expect(result.issueIds).toEqual([issueId]);
+    expect((await heartbeat.reconcileStrandedAssignedIssues()).dispatchRequeued).toBe(0);
 
     const runs = await db
       .select()
@@ -5298,6 +5316,52 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     if (retryRun) {
       await waitForRunToSettle(heartbeat, retryRun.id);
     }
+  });
+
+  it.each([
+    ["Wait for reviewer feedback or approval before continuing executor work.", true, false],
+    ["Wait for reviewer feedback or approval before continuing executor work.", false, true],
+    ["Resume implementation from the acceptance criteria.", false, true],
+    ["Wait for board approval of the production release.", false, false],
+  ] as const)("checks current execution state for queued summary %s (run=%s, approval=%s)", async (nextAction, shouldRun, pendingApproval) => {
+    const { companyId, agentId, issueId } = await seedStrandedIssueFixture({ status: "in_progress", runStatus: "succeeded" });
+    if (pendingApproval) {
+      const approvalId = randomUUID();
+      await db.insert(approvals).values({ id: approvalId, companyId, type: "approve_ceo_strategy", status: "pending", payload: {} });
+      await db.insert(issueApprovals).values({ companyId, issueId, approvalId });
+    }
+    const heartbeat = heartbeatService(db);
+    const run = await heartbeat.wakeup(agentId, {
+      source: "automation", triggerDetail: "system", reason: "issue_continuation_needed",
+      payload: { issueId },
+      contextSnapshot: {
+        issueId, taskId: issueId, wakeReason: "issue_continuation_needed",
+        paperclipContinuationSummary: { body: `# Continuation Summary\n\n## Next Action\n\n- ${nextAction}` },
+      },
+    });
+    expect(run).toBeTruthy();
+    const settled = await waitForRunToSettle(heartbeat, run!.id);
+    if (shouldRun) {
+      expect(settled?.errorCode).not.toBe("issue_continuation_waiting_on_review");
+      expect(mockAdapterExecute).toHaveBeenCalledWith(expect.objectContaining({ runId: run!.id }));
+    } else {
+      expect(settled?.errorCode).toBe("issue_continuation_waiting_on_review");
+      expect(mockAdapterExecute).not.toHaveBeenCalledWith(expect.objectContaining({ runId: run!.id }));
+    }
+  });
+
+  it("escalates a successful assignment recovery that still leaves todo, without retrying forever", async () => {
+    const { agentId, issueId } = await seedStrandedIssueFixture({
+      status: "todo", runStatus: "succeeded", retryReason: "assignment_recovery",
+    });
+    const heartbeat = heartbeatService(db);
+    const first = await heartbeat.reconcileStrandedAssignedIssues();
+    expect(first.escalated).toBe(1);
+    expect(first.dispatchRequeued).toBe(0);
+    const second = await heartbeat.reconcileStrandedAssignedIssues();
+    expect(second.dispatchRequeued).toBe(0);
+    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, agentId))).toHaveLength(1);
+    expect(await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, issueId))).toHaveLength(1);
   });
 
   it("re-enqueues an already stranded execution-review participant during reconciliation", async () => {

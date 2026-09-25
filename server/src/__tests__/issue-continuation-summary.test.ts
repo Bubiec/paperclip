@@ -101,6 +101,26 @@ describe("issue continuation summaries", () => {
     expect(continuationSummaryParksExecutor(body)).toBe(true);
   });
 
+  it.each(["todo", "in_progress"])("drops inherited generated review waits after returning to %s", (status) => {
+    const issue = { id: "issue-1", identifier: "PAP-1", title: "Resume", description: null, priority: "medium", status: "in_review" };
+    const run = { id: "run-1", status: "succeeded", error: null };
+    const agent = { id: "agent-1", name: "Coder", adapterType: "codex_local" };
+    const previousSummaryBody = buildContinuationSummaryMarkdown({ issue, run, agent });
+    const body = buildContinuationSummaryMarkdown({ issue: { ...issue, status }, run, agent, previousSummaryBody });
+    expect(extractContinuationSummaryNextAction(body)).toContain("Resume implementation");
+    expect(continuationSummaryParksExecutor(body)).toBe(false);
+  });
+
+  it("preserves explicit human approval instructions while work is in progress", () => {
+    const body = buildContinuationSummaryMarkdown({
+      issue: { id: "issue-1", identifier: "PAP-1", title: "Resume", description: null, priority: "medium", status: "in_progress" },
+      run: { id: "run-1", status: "succeeded", error: null },
+      agent: { id: "agent-1", name: "Coder", adapterType: "codex_local" },
+      previousSummaryBody: "## Next Action\n\n- Wait for board approval of the production release.",
+    });
+    expect(continuationSummaryParksExecutor(body)).toBe(true);
+  });
+
   it("does not park executor work when the next action is still runnable", () => {
     const body = [
       "# Continuation Summary",
