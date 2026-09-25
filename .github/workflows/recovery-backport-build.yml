@@ -13,8 +13,6 @@ env:
 jobs:
   validate:
     runs-on: ubuntu-latest
-    env:
-      PAPERCLIP_HOME: ${{ runner.temp }}/paperclip-validation
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -37,6 +35,8 @@ jobs:
           node scripts/release-package-map.mjs check
       - run: pnpm install --frozen-lockfile
       - run: ${{ matrix.command }}
+        env:
+          PAPERCLIP_HOME: ${{ runner.temp }}/paperclip-validation
   payload:
     needs: validate
     runs-on: ubuntu-latest
