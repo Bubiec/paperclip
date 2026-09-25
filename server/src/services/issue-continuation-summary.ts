@@ -100,13 +100,25 @@ function inferMode(issue: IssueSummaryInput, run: RunSummaryInput) {
   return "implementation";
 }
 
-function inferNextAction(issue: IssueSummaryInput, run: RunSummaryInput, previousNextAction: string | null) {
+function hasGeneratedReviewNextAction(body: string | null | undefined) {
+  if (!body) return false;
+  // Legacy generated summaries carry review-state metadata. A matching sentence
+  // alone is also a valid explicit instruction and must fail closed.
+  const header = body.split(/^##\s/m, 1)[0] ?? "";
+  return /^- Status: in_review\s*$/m.test(header)
+    && /^- Current mode: review\s*$/m.test(header)
+    && /^- Last updated by run: \S+\s*$/m.test(header)
+    && extractMarkdownSection(body, "Next Action") === `- ${GENERATED_REVIEW_NEXT_ACTION}`;
+}
+
+function inferNextAction(issue: IssueSummaryInput, run: RunSummaryInput, previousBody: string | null | undefined) {
+  let previousNextAction = extractPreviousNextAction(previousBody);
   if (issue.status === "done") return "Review the completed issue output and close any remaining follow-up comments.";
   if (issue.status === "in_review") return GENERATED_REVIEW_NEXT_ACTION;
   // This default describes a status, not a durable approval. Do not carry it
   // across a return to executable work; retain specific operator instructions.
   if ((issue.status === "todo" || issue.status === "in_progress")
-    && previousNextAction === GENERATED_REVIEW_NEXT_ACTION) previousNextAction = null;
+    && hasGeneratedReviewNextAction(previousBody)) previousNextAction = null;
   if (run.status === "failed" || run.status === "timed_out") {
     return "Inspect the failed run, fix the cause, and resume from the most recent concrete action above.";
   }
@@ -141,7 +153,7 @@ export function continuationSummaryParksExecutor(
   if (!nextAction) return false;
   if (currentState?.status === "in_progress"
     && !currentState.hasPendingReviewOrApproval
-    && nextAction === GENERATED_REVIEW_NEXT_ACTION) return false;
+    && hasGeneratedReviewNextAction(body)) return false;
   return WAITING_FOR_REVIEW_OR_APPROVAL_RE.test(nextAction);
 }
 
@@ -165,7 +177,7 @@ export function buildContinuationSummaryMarkdown(input: {
   const objective = extractMarkdownSection(issue.description, "Objective") ?? issue.description?.trim() ?? "No objective captured.";
   const acceptanceCriteria = extractMarkdownSection(issue.description, "Acceptance Criteria") ?? "No explicit acceptance criteria captured.";
   const mode = inferMode(issue, run);
-  const nextAction = inferNextAction(issue, run, extractPreviousNextAction(input.previousSummaryBody));
+  const nextAction = inferNextAction(issue, run, input.previousSummaryBody);
 
   const body = [
     "# Continuation Summary",

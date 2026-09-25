@@ -15,8 +15,11 @@ package manifest, lockfile, scheduler, capacity policy or worker instruction cha
   lost-wake timestamp path; reject unrelated old handbacks.
 - Spend the existing one-retry assignment-recovery budget even when the adapter
   exits successfully but leaves a stranded `todo`; escalate rather than loop.
-- Drop only the exact generated review default after return to executable work.
-  Preserve specific operator instructions.
+- Drop the exact generated review default only with its review-state header
+  (`Status: in_review`, `Current mode: review`, and nonempty `Last updated by run`)
+  and a sole default Next Action. Matching text alone is an explicit wait.
+  Preserve specific operator instructions and ambiguous legacy summaries, including
+  ones already rewritten with `Status: in_progress`; those require explicit resolution.
 - At continuation claim, pending interactions, pending/revision-requested approvals
   and pending execution stages remain gates even when the summary says to resume.
 

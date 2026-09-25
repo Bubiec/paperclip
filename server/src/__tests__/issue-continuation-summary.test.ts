@@ -107,8 +107,37 @@ describe("issue continuation summaries", () => {
     const agent = { id: "agent-1", name: "Coder", adapterType: "codex_local" };
     const previousSummaryBody = buildContinuationSummaryMarkdown({ issue, run, agent });
     const body = buildContinuationSummaryMarkdown({ issue: { ...issue, status }, run, agent, previousSummaryBody });
+    expect(continuationSummaryParksExecutor(previousSummaryBody, { status: "in_progress", hasPendingReviewOrApproval: false })).toBe(false);
+    expect(continuationSummaryParksExecutor(previousSummaryBody, { status: "in_progress", hasPendingReviewOrApproval: true })).toBe(true);
     expect(extractContinuationSummaryNextAction(body)).toContain("Resume implementation");
     expect(continuationSummaryParksExecutor(body)).toBe(false);
+  });
+
+  it.each(["todo", "in_progress"])("preserves an unproven review instruction after returning to %s", (status) => {
+    const previousSummaryBody = "## Next Action\n\n- Wait for reviewer feedback or approval before continuing executor work.";
+    const body = buildContinuationSummaryMarkdown({
+      issue: { id: "issue-1", identifier: "PAP-1", title: "Resume", description: null, priority: "medium", status },
+      run: { id: "run-1", status: "succeeded", error: null },
+      agent: { id: "agent-1", name: "Coder", adapterType: "codex_local" },
+      previousSummaryBody,
+    });
+    expect(extractContinuationSummaryNextAction(body)).toBe(extractContinuationSummaryNextAction(previousSummaryBody));
+    expect(continuationSummaryParksExecutor(previousSummaryBody, { status, hasPendingReviewOrApproval: false })).toBe(true);
+  });
+
+  it.each(["in_progress", "additional_instruction", "missing_run"])("fails closed for ambiguous generated-looking summaries: %s", (variant) => {
+    const issue = { id: "issue-1", identifier: "PAP-1", title: "Resume", description: null, priority: "medium", status: "in_review" };
+    const run = { id: "run-1", status: "succeeded", error: null };
+    const agent = { id: "agent-1", name: "Coder", adapterType: "codex_local" };
+    const generated = buildContinuationSummaryMarkdown({ issue, run, agent });
+    const previousSummaryBody = variant === "in_progress"
+      ? generated.replace("- Status: in_review", "- Status: in_progress")
+      : variant === "missing_run"
+        ? generated.replace("- Last updated by run: run-1", "")
+        : `${generated}\n- Wait for operator approval of production activation.`;
+    expect(continuationSummaryParksExecutor(previousSummaryBody, { status: "in_progress", hasPendingReviewOrApproval: false })).toBe(true);
+    const body = buildContinuationSummaryMarkdown({ issue: { ...issue, status: "in_progress" }, run, agent, previousSummaryBody });
+    expect(continuationSummaryParksExecutor(body)).toBe(true);
   });
 
   it("preserves explicit human approval instructions while work is in progress", () => {

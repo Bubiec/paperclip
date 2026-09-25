@@ -12779,7 +12779,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           stale: true,
           errorCode: "issue_continuation_waiting_on_review",
           reason:
-            "Cancelled because a pending review/approval gate or an explicit continuation instruction requires the executor to wait",
+            "Cancelled because a pending review/approval gate requires a wait or the continuation summary says the executor should wait",
           details: {
             issueId,
             wakeReason,

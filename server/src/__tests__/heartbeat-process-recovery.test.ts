@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { buildContinuationSummaryMarkdown } from "../services/issue-continuation-summary.js";
 import { spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
@@ -4762,7 +4763,13 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       payload: { issueId },
       contextSnapshot: {
         issueId, taskId: issueId, wakeReason: "issue_continuation_needed",
-        paperclipContinuationSummary: { body: `# Continuation Summary\n\n## Next Action\n\n- ${nextAction}` },
+        paperclipContinuationSummary: { body: nextAction === "Wait for reviewer feedback or approval before continuing executor work."
+          ? buildContinuationSummaryMarkdown({
+            issue: { id: issueId, identifier: null, title: "Previous review", description: null, status: "in_review", priority: "medium" },
+            run: { id: randomUUID(), status: "succeeded", error: null },
+            agent: { id: agentId, name: "Coder", adapterType: "codex_local" },
+          })
+          : `# Continuation Summary\n\n## Next Action\n\n- ${nextAction}` },
       },
     });
     expect(run).toBeTruthy();

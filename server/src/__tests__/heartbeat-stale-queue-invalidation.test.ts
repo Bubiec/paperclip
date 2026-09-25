@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { buildContinuationSummaryMarkdown } from "../services/issue-continuation-summary.js";
 import { eq, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
@@ -1585,6 +1586,53 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
     expect(wakeup?.error).toContain("continuation summary says the executor should wait");
     expect(countExecuteCallsForRun(runId)).toBe(0);
   });
+
+  it.each(["generated", "explicit", "operator"] as const)(
+    "checks %s summary ownership during a capacity MONITORED_WAIT continuation",
+    async (summaryKind) => {
+      const { companyId, agentId } = await seedCompanyAndAgent();
+      const issueId = randomUUID();
+      const nextCheckAt = new Date(Date.now() + 60_000);
+      await db.insert(issues).values({
+        id: issueId, companyId, title: "MONITORED_WAIT: capacity admission", status: "in_progress",
+        priority: "medium", assigneeAgentId: agentId,
+        executionPolicy: {
+          mode: "normal", commentRequired: true, stages: [],
+          monitor: { nextCheckAt: nextCheckAt.toISOString(), notes: "Retry capacity admission, not review approval", scheduledBy: "assignee", kind: "external_service", serviceName: "capacity" },
+        },
+        monitorNextCheckAt: nextCheckAt,
+        monitorNotes: "MONITORED_WAIT: capacity admission",
+        monitorScheduledBy: "assignee",
+      });
+      const generatedBody = buildContinuationSummaryMarkdown({
+        issue: { id: issueId, identifier: null, title: "Prior review", description: null, status: "in_review", priority: "medium" },
+        run: { id: randomUUID(), status: "succeeded", error: null },
+        agent: { id: agentId, name: "Coder", adapterType: "codex_local" },
+      });
+      await seedContinuationSummary({
+        companyId, issueId, agentId,
+        body: summaryKind === "generated" ? generatedBody
+          : `## Next Action\n\n- ${summaryKind === "explicit"
+            ? "Wait for reviewer feedback or approval before continuing executor work."
+            : "Wait for operator approval of the production rollout."}`,
+      });
+      const { runId, wakeupRequestId } = await seedQueuedRun({
+        companyId, agentId, issueId, wakeReason: "issue_continuation_needed", invocationSource: "automation",
+        contextExtras: { retryReason: "issue_continuation_needed" },
+      });
+      await heartbeat.resumeQueuedRuns();
+      await waitForCondition(async () => {
+        const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
+        return run?.status === "succeeded" || run?.status === "cancelled";
+      });
+      const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
+      const [wakeup] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, wakeupRequestId));
+      expect(run?.status).toBe(summaryKind === "generated" ? "succeeded" : "cancelled");
+      expect(run?.errorCode).toBe(summaryKind === "generated" ? null : "issue_continuation_waiting_on_review");
+      expect(countExecuteCallsForRun(runId)).toBe(summaryKind === "generated" ? 1 : 0);
+      if (summaryKind !== "generated") expect(wakeup?.status).toBe("skipped");
+    },
+  );
 
   it("runs accepted-interaction continuation recovery despite a pre-acceptance review park", async () => {
     const { companyId, agentId } = await seedCompanyAndAgent();
