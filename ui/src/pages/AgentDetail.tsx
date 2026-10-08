@@ -964,6 +964,15 @@ export function AgentDetail() {
 
   useEffect(() => {
     if (!agent) return;
+    if (routeAgentRef !== canonicalAgentRef) {
+      // Canonicalization changes the query key, not the selected agent. Seed
+      // the same company-scoped record before navigation so a loading skeleton
+      // cannot unmount RunDetail and discard an in-flight retry or its denial.
+      queryClient.setQueryData(
+        [...queryKeys.agents.detail(canonicalAgentRef), lookupCompanyId ?? null],
+        agent,
+      );
+    }
     if (urlRunId) {
       if (routeAgentRef !== canonicalAgentRef) {
         navigate(`/agents/${canonicalAgentRef}/runs/${urlRunId}`, { replace: true });
@@ -976,7 +985,7 @@ export function AgentDetail() {
       navigate(agentDetailHref(canonicalAgentRef, canonicalTab), { replace: true });
       return;
     }
-  }, [agent, routeAgentRef, canonicalAgentRef, urlRunId, urlTab, activeView, legacyAuditSection, navigate]);
+  }, [agent, routeAgentRef, canonicalAgentRef, lookupCompanyId, queryClient, urlRunId, urlTab, activeView, legacyAuditSection, navigate]);
 
   useEffect(() => {
     if (!agent?.companyId || agent.companyId === selectedCompanyId) return;
