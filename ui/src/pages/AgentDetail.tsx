@@ -810,11 +810,34 @@ export function AgentDetail() {
   const prepareAgentNavigation = useCallback(() => {
     return confirmAgentConfigNavigation(configDirty);
   }, [configDirty]);
-  const { data: agent, isLoading, error } = useQuery<AgentDetailRecord>({
+  const { data: fetchedAgent, isLoading, error: fetchError } = useQuery<AgentDetailRecord>({
     queryKey: [...queryKeys.agents.detail(routeAgentRef), lookupCompanyId ?? null],
-    queryFn: () => agentsApi.get(routeAgentRef, lookupCompanyId),
+    queryFn: async () => {
+      const result = await agentsApi.get(routeAgentRef, lookupCompanyId);
+      // UUID lookup authorizes the resource company, not the company query hint.
+      if (result.companyId !== lookupCompanyId) {
+        throw new Error("Agent does not belong to the requested company");
+      }
+      return result;
+    },
     enabled: canFetchAgent,
+    // Keep RunDetail mounted across UUID -> canonical navigation without
+    // overwriting canonical data or promoting an old snapshot to fresh cache.
+    placeholderData: (previous, previousQuery) =>
+      previousQuery?.state.status === "success"
+      && isUuidLike(String(previousQuery.queryKey[2]))
+      && previous !== undefined
+      && previous.id === previousQuery.queryKey[2]
+      && previous.companyId === lookupCompanyId
+      && agentRouteRef(previous) === routeAgentRef
+        ? previous
+        : undefined,
   });
+  // Apply the same boundary to pre-existing cache entries before rendering or navigation.
+  const agent = fetchedAgent?.companyId === lookupCompanyId ? fetchedAgent : undefined;
+  const error = fetchedAgent && !agent
+    ? new Error("Agent does not belong to the requested company")
+    : fetchError;
   const resolvedCompanyId = agent?.companyId ?? selectedCompanyId;
   const canonicalAgentRef = agent ? agentRouteRef(agent) : routeAgentRef;
   const handleLegacyTabChange = useCallback((next: string) => {
@@ -963,16 +986,7 @@ export function AgentDetail() {
   );
 
   useEffect(() => {
-    if (!agent) return;
-    if (routeAgentRef !== canonicalAgentRef) {
-      // Canonicalization changes the query key, not the selected agent. Seed
-      // the same company-scoped record before navigation so a loading skeleton
-      // cannot unmount RunDetail and discard an in-flight retry or its denial.
-      queryClient.setQueryData(
-        [...queryKeys.agents.detail(canonicalAgentRef), lookupCompanyId ?? null],
-        agent,
-      );
-    }
+    if (!agent || error) return;
     if (urlRunId) {
       if (routeAgentRef !== canonicalAgentRef) {
         navigate(`/agents/${canonicalAgentRef}/runs/${urlRunId}`, { replace: true });
@@ -985,7 +999,7 @@ export function AgentDetail() {
       navigate(agentDetailHref(canonicalAgentRef, canonicalTab), { replace: true });
       return;
     }
-  }, [agent, routeAgentRef, canonicalAgentRef, lookupCompanyId, queryClient, urlRunId, urlTab, activeView, legacyAuditSection, navigate]);
+  }, [agent, error, routeAgentRef, canonicalAgentRef, urlRunId, urlTab, activeView, legacyAuditSection, navigate]);
 
   useEffect(() => {
     if (!agent?.companyId || agent.companyId === selectedCompanyId) return;
