@@ -22,7 +22,7 @@ still has authority over the issue:
 
 ## Retry-lineage migration
 
-`0317_giant_madame_masque.sql` adds
+`0318_oval_blade.sql` adds
 `heartbeat_runs_retry_of_run_id_not_self_check`. Before validation it repairs
 legacy self-links in batches of at most 1,000 rows using a temporary partial
 index. Valid ancestor references and other run fields are unchanged. The index

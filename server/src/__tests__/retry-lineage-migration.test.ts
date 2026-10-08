@@ -13,7 +13,7 @@ it("upgrades predecessor retry lineage in bounded batches and replays the journa
     expect((await inspectMigrations(temporary.connectionString)).status).toBe("upToDate");
     const journal = JSON.parse(await readFile(new URL("../../../packages/db/src/migrations/meta/_journal.json", import.meta.url), "utf8"));
     const migration = journal.entries.at(-1);
-    expect(migration.tag).toBe("0317_giant_madame_masque");
+    expect(migration.tag).toBe("0318_oval_blade");
     // Reconstruct the exact predecessor schema/journal for this additive check.
     await db.execute(sql`alter table heartbeat_runs drop constraint heartbeat_runs_retry_of_run_id_not_self_check`);
     await db.execute(sql`delete from drizzle.__drizzle_migrations where created_at = ${migration.when}`);
