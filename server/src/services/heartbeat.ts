@@ -11455,6 +11455,13 @@ export function heartbeatService(
         and(
           eq(issues.id, input.claimed.id),
           eq(issues.companyId, input.claimed.companyId),
+          // A timer has no execution ownership. Its stale claim must never
+          // revoke a checkout or execution accepted before this atomic write.
+          isNull(issues.checkoutRunId),
+          isNull(issues.executionRunId),
+          input.claimed.assigneeAgentId
+            ? eq(issues.assigneeAgentId, input.claimed.assigneeAgentId)
+            : isNull(issues.assigneeAgentId),
           or(
             inArray(issues.status, ["todo", "in_progress", "in_review"]),
             and(eq(issues.status, "blocked"), isNull(issues.unblockDescriptor)),
@@ -13237,7 +13244,7 @@ export function heartbeatService(
         continuationAttempt: decision.attempt,
         livenessReason: `${run.livenessReason ?? "Run ended without concrete progress"}; continuation attempts exhausted`,
       });
-      await db
+      const transitioned = await db
         .update(issues)
         .set({
           status: "blocked",
@@ -13257,12 +13264,19 @@ export function heartbeatService(
           and(
             eq(issues.id, issueId),
             eq(issues.companyId, run.companyId),
+            // Release may already have promoted accepted work. Fence both owner
+            // columns in the write itself, not in the earlier decision read.
+            eq(issues.assigneeAgentId, run.agentId),
+            or(isNull(issues.checkoutRunId), eq(issues.checkoutRunId, run.id)),
+            or(isNull(issues.executionRunId), eq(issues.executionRunId, run.id)),
             or(
               inArray(issues.status, ["todo", "in_progress"]),
               and(eq(issues.status, "blocked"), isNull(issues.unblockDescriptor)),
             ),
           ),
-        );
+        )
+        .returning({ id: issues.id });
+      if (transitioned.length === 0) return;
       await addContinuationExhaustedCommentOnce({
         run,
         issueId,

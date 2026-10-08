@@ -438,6 +438,26 @@ describeEmbeddedPostgres("issue monitor scheduler", () => {
     expect(activity).toContain("issue.monitor_skipped");
   });
 
+  it.each(["checkoutRunId", "executionRunId"] as const)("preserves %s instead of exhausting a monitor over accepted work", async (ownerField) => {
+    const { issueId, companyId, agentId } = await seedFixture({
+      monitorAttemptCount: 1, monitor: { maxAttempts: 1, recoveryPolicy: "wake_owner" },
+    });
+    const newerRunId = randomUUID();
+    await db.insert(heartbeatRuns).values({ id: newerRunId, companyId, agentId, status: "succeeded" });
+    await db.update(issues).set({ [ownerField]: newerRunId }).where(eq(issues.id, issueId));
+    const heartbeat = heartbeatService(db);
+    await heartbeat.tickTimers(new Date("2026-04-11T12:31:00.000Z"));
+    const issue = (await db.select().from(issues).where(eq(issues.id, issueId)))[0]!;
+    expect(issue[ownerField]).toBe(newerRunId);
+    expect(issue.status).toBe("in_progress");
+    expect(issue.unblockDescriptor).toBeNull();
+    expect(issue.monitorNextCheckAt).not.toBeNull();
+    const wakes = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.agentId, agentId));
+    expect(wakes).toHaveLength(0);
+    const activity = await db.select().from(activityLog).where(eq(activityLog.entityId, issueId));
+    expect(activity.some((row) => row.action === "issue.monitor_exhausted")).toBe(false);
+  });
+
   it("clears exhausted monitors and queues bounded owner recovery instead of another due check", async () => {
     const { issueId, agentId } = await seedFixture({
       monitorAttemptCount: 1,

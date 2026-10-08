@@ -10524,6 +10524,44 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     }
   });
 
+  it.each(["checkoutRunId", "executionRunId"] as const)("preserves a newer %s when an old plan-only run exhausts its budget", async (ownerField) => {
+    const { companyId, agentId, issueId, runId } = await seedStrandedIssueFixture({
+      status: "in_progress", runStatus: "failed",
+    });
+    await db.update(heartbeatRuns).set({ lastUsefulActionAt: null }).where(eq(heartbeatRuns.id, runId));
+    await db.insert(heartbeatRuns).values({
+      companyId, agentId, status: "succeeded", livenessState: "plan_only",
+      continuationAttempt: 2, contextSnapshot: { issueId, taskId: issueId },
+      createdAt: new Date("2026-02-01T00:00:00.000Z"),
+      finishedAt: new Date("2026-02-01T00:01:00.000Z"),
+    });
+    const newerRunId = randomUUID();
+    mockAdapterExecute.mockImplementationOnce(async () => {
+      // Another accepted owner wins before the old run's finish path. Neither
+      // release nor exhaustion may revoke that owner, even for the same agent.
+      await db.insert(heartbeatRuns).values({
+        id: newerRunId, companyId, agentId, status: "running",
+        contextSnapshot: { issueId, taskId: issueId }, startedAt: new Date(),
+      });
+      await db.update(issues).set({ [ownerField]: newerRunId }).where(eq(issues.id, issueId));
+      return { exitCode: 0, signal: null, timedOut: false, errorMessage: null,
+        summary: "I will inspect the repo next and then implement the fix.", provider: "test", model: "test-model" };
+    });
+    const heartbeat = heartbeatService(db);
+    await heartbeat.reconcileStrandedAssignedIssues();
+    await heartbeat.promoteDueScheduledRetries(new Date(Date.now() + 31_000));
+    await heartbeat.resumeQueuedRuns();
+    await heartbeat.drainActiveRunExecutions();
+    const issue = (await db.select().from(issues).where(eq(issues.id, issueId)))[0]!;
+    // The competing run is synthetic; finish it before fixture cleanup.
+    await db.update(heartbeatRuns).set({ status: "succeeded", finishedAt: new Date() }).where(eq(heartbeatRuns.id, newerRunId));
+    expect(issue[ownerField]).toBe(newerRunId);
+    expect(issue.status).toBe("in_progress");
+    expect(issue.unblockDescriptor).toBeNull();
+    const activity = await db.select().from(activityLog).where(eq(activityLog.entityId, issueId));
+    expect(activity.some((row) => row.action === "issue.liveness_continuation_exhausted")).toBe(false);
+  });
+
   it("blocks replacement plan-only runs after the durable issue-and-cause budget is exhausted", async () => {
     mockAdapterExecute.mockResolvedValueOnce({
       exitCode: 0,
